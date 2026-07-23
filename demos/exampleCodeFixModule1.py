@@ -1,5 +1,7 @@
 """Atlas local-guide agent, rewritten against the agentic security framework.
 
+NOTE: Use --self-test to simulate production boundaries.
+
 Control mapping (framework section -> component):
   §4.1  IdentityAuthority, AgentIdentity   asymmetric (Ed25519) identity with a
                                            trust anchor, key_id, expiry

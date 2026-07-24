@@ -135,6 +135,17 @@ Environment variables:
 - `AGENT_RATE_LIMIT_WINDOW_SECONDS`: rate-limit window length in seconds (default `60`)
 - `AGENT_ALLOW_VERBOSE`: allow per-request verbose mode when `true` (default `false`)
 
+Default response security headers:
+
+- `X-Content-Type-Options: nosniff`
+- `Cache-Control: no-store`
+- `Pragma: no-cache`
+- `Referrer-Policy: no-referrer`
+- `X-Frame-Options: DENY`
+- `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'`
+
+When JWT auth is enabled, `401` responses include `WWW-Authenticate: Bearer ...`.
+
 Optional JWT/OIDC bearer validation:
 
 - `AGENT_JWT_ISSUER`: expected token issuer (for `iss` claim)
@@ -226,6 +237,53 @@ Correlation ID behavior:
 - If missing, a UUID is generated.
 - The server returns `X-Correlation-ID` on responses.
 - The same value is propagated into downstream tool telemetry for request-level traceability.
+
+### Error Contract (API + Tools)
+
+API error responses from `module2/app.py` and tool error payloads in `module2/tools/repo_tools.py` follow a standardized structure:
+
+- `error_code`: stable machine-readable identifier
+- `error`: human-readable message
+- `retry_with`: actionable remediation hint
+- `escalate`: `true` when operator/support escalation is recommended
+
+Additional fields:
+
+- API responses also include `correlation_id`
+- Tool responses include the telemetry envelope fields (`tool`, `input`, `status`, `latency_ms`, `correlation_id`) with the structured error object under `data`
+
+Example API error:
+
+```json
+{
+  "error_code": "REPO_ROOT_NOT_ALLOWED",
+  "error": "Repository path is outside allowed roots",
+  "retry_with": "Use a repository under AGENT_ALLOWED_REPO_ROOTS or update the allowlist.",
+  "escalate": true,
+  "correlation_id": "<uuid>"
+}
+```
+
+Example tool error envelope:
+
+```json
+{
+  "tool": "read_file_content",
+  "input": {
+    "repo_path": "/abs/repo",
+    "file_path": "missing.txt"
+  },
+  "status": "error",
+  "latency_ms": 5,
+  "correlation_id": "<uuid>",
+  "data": {
+    "error_code": "FILE_NOT_FOUND",
+    "error": "File not found: missing.txt",
+    "retry_with": "Check file_path spelling and ensure the file exists under repo_path.",
+    "escalate": false
+  }
+}
+```
 
 ## LangSmith Tracing
 

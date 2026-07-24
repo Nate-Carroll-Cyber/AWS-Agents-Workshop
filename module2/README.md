@@ -122,6 +122,94 @@ curl -X POST http://localhost:8081/analyze \
   -d '{"repo_path": "/path/to/repo"}'
 ```
 
+### HTTP Security Hardening
+
+The Module 2 HTTP server now supports basic hardening controls.
+
+Environment variables:
+
+- `AGENT_API_KEY`: if set, requests must include `X-API-Key` or `Authorization: Bearer <key>`
+- `AGENT_ALLOWED_REPO_ROOTS`: path-separated allowlist for repositories (defaults to project root)
+- `AGENT_MAX_BODY_BYTES`: max JSON request size in bytes (default `32768`)
+- `AGENT_RATE_LIMIT_REQUESTS`: max requests per IP in window (default `20`)
+- `AGENT_RATE_LIMIT_WINDOW_SECONDS`: rate-limit window length in seconds (default `60`)
+- `AGENT_ALLOW_VERBOSE`: allow per-request verbose mode when `true` (default `false`)
+
+Optional JWT/OIDC bearer validation:
+
+- `AGENT_JWT_ISSUER`: expected token issuer (for `iss` claim)
+- `AGENT_JWT_AUDIENCE`: expected token audience (for `aud` claim)
+- `AGENT_JWT_JWKS_URL`: JWKS endpoint URL for signature verification
+- `AGENT_JWT_ALGORITHMS`: comma-separated accepted algorithms (default `RS256`)
+- `AGENT_JWT_LEEWAY_SECONDS`: clock-skew tolerance in seconds (default `30`)
+- `AGENT_JWT_REQUIRED_SCOPES`: comma-separated scopes that must all be present
+- `AGENT_JWT_REQUIRED_ROLES`: comma-separated roles/groups that must all be present
+- `AGENT_JWT_SCOPE_CLAIMS`: comma-separated claim names to read scopes from (default `scope,scp`)
+- `AGENT_JWT_ROLE_CLAIMS`: comma-separated claim names to read roles from (default `roles,cognito:groups,groups`)
+
+Install JWT dependencies before enabling JWT auth:
+
+```bash
+pip install "pyjwt[crypto]"
+```
+
+Example (recommended for non-demo use):
+
+```bash
+export AGENT_API_KEY="change-me"
+export AGENT_ALLOWED_REPO_ROOTS="/Users/you/repos:/opt/work/repos"
+
+python module2/app.py
+
+curl -X POST http://localhost:8081/analyze \
+  -H "X-API-Key: $AGENT_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"repo_path": "/Users/you/repos/my-app"}'
+```
+
+JWT-only example:
+
+```bash
+export AGENT_JWT_ISSUER="https://your-idp.example.com/"
+export AGENT_JWT_AUDIENCE="repo-analysis-api"
+export AGENT_JWT_JWKS_URL="https://your-idp.example.com/.well-known/jwks.json"
+export AGENT_JWT_REQUIRED_SCOPES="repo:analyze"
+export AGENT_JWT_REQUIRED_ROLES="devops"
+
+python module2/app.py
+
+curl -X POST http://localhost:8081/analyze \
+  -H "Authorization: Bearer <jwt-token>" \
+  -H "Content-Type: application/json" \
+  -d '{"repo_path": "/Users/you/repos/my-app"}'
+```
+
+RBAC behavior notes:
+
+- Scope and role checks are optional; they are enforced only when the corresponding required lists are set.
+- All required scopes must be present.
+- All required roles must be present.
+- Scope claims support either space-delimited strings or arrays.
+- Role claims support either arrays or whitespace-delimited strings.
+
+### Agent and Model Guardrails
+
+Security controls now also apply when using Python APIs directly (not only HTTP):
+
+- `analyze_repository(...)` validates `repo_path` is absolute, exists, is a git repo, and is under `AGENT_ALLOWED_REPO_ROOTS`
+- `create_agent(...)` enforces `max_iterations >= 1` and applies a recursion limit to bound tool loops
+- `get_chat_bedrock_model(...)` validates region format, temperature range, and max token range
+- model IDs are restricted by allowlist
+
+Model policy environment variable:
+
+- `AGENT_ALLOWED_MODEL_IDS`: comma-separated Bedrock model IDs allowed by policy
+
+If `AGENT_ALLOWED_MODEL_IDS` is not set, defaults are:
+
+- `us.anthropic.claude-sonnet-4-20250514-v1:0`
+- `anthropic.claude-sonnet-4-20250514-v1:0`
+
 ## LangSmith Tracing
 
 Enable LangSmith for detailed observability:

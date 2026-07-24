@@ -20,8 +20,8 @@ USAGE
   AGENT_MOCK_REPO=true python module2/app.py
 
   # Analyze a repository
-  curl -X POST http://localhost:8081/analyze \\
-    -H "Content-Type: application/json" \\
+  curl -X POST http://localhost:8081/analyze \
+    -H "Content-Type: application/json" \
     -d '{"repo_path": "/path/to/repo"}'
 """
 
@@ -32,12 +32,12 @@ import os
 import secrets
 import sys
 import time
-from uuid import uuid4
 from collections import defaultdict, deque
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from threading import Lock
 from typing import Any
+from uuid import uuid4
 
 try:
     import jwt
@@ -149,6 +149,28 @@ print("  Agent ready.\n")
 # Request handler
 # ---------------------------------------------------------------------------
 
+def _error_payload(
+    *,
+    error_code: str,
+    message: str,
+    retry_with: str,
+    escalate: bool,
+    correlation_id: str,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a consistent error response payload for API callers."""
+    payload: dict[str, Any] = {
+        "error_code": error_code,
+        "error": message,
+        "retry_with": retry_with,
+        "escalate": escalate,
+        "correlation_id": correlation_id,
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
 def _handle_analysis(payload: dict) -> dict:
     """
     Process a repository analysis request.
@@ -169,40 +191,76 @@ def _handle_analysis(payload: dict) -> dict:
 
     repo_path = payload.get("repo_path", "").strip()
     if not repo_path:
-        return {"error": "Missing required field: 'repo_path'", "correlation_id": correlation_id}
+        return _error_payload(
+            error_code="MISSING_REPO_PATH",
+            message="Missing required field: 'repo_path'",
+            retry_with="Provide an absolute repository path in repo_path.",
+            escalate=False,
+            correlation_id=correlation_id,
+        )
 
     repo = Path(repo_path).expanduser()
     if not repo.is_absolute():
-        return {"error": "repo_path must be an absolute path", "correlation_id": correlation_id}
+        return _error_payload(
+            error_code="INVALID_REPO_PATH",
+            message="repo_path must be an absolute path",
+            retry_with="Use an absolute filesystem path, e.g. /Users/you/repos/my-repo.",
+            escalate=False,
+            correlation_id=correlation_id,
+        )
 
     try:
         resolved_repo = repo.resolve()
     except Exception:
-        return {"error": "Invalid repo_path", "correlation_id": correlation_id}
+        return _error_payload(
+            error_code="INVALID_REPO_PATH",
+            message="Invalid repo_path",
+            retry_with="Verify the path exists and can be resolved by the server.",
+            escalate=False,
+            correlation_id=correlation_id,
+        )
 
     if not resolved_repo.exists() or not resolved_repo.is_dir():
-        return {
-            "error": "Repository path does not exist or is not a directory",
-            "correlation_id": correlation_id,
-        }
+        return _error_payload(
+            error_code="REPO_NOT_FOUND",
+            message="Repository path does not exist or is not a directory",
+            retry_with="Provide an existing directory path.",
+            escalate=False,
+            correlation_id=correlation_id,
+        )
 
     if not (resolved_repo / ".git").exists():
-        return {"error": "Not a git repository (missing .git directory)", "correlation_id": correlation_id}
+        return _error_payload(
+            error_code="NOT_A_GIT_REPO",
+            message="Not a git repository (missing .git directory)",
+            retry_with="Point repo_path to a git repository root containing a .git directory.",
+            escalate=False,
+            correlation_id=correlation_id,
+        )
 
     allowed = any(
         resolved_repo == root or root in resolved_repo.parents
         for root in ALLOWED_REPO_ROOTS
     )
     if not allowed:
-        return {
-            "error": "Repository path is outside allowed roots",
-            "allowed_roots": [str(root) for root in ALLOWED_REPO_ROOTS],
-            "correlation_id": correlation_id,
-        }
+        return _error_payload(
+            error_code="REPO_ROOT_NOT_ALLOWED",
+            message="Repository path is outside allowed roots",
+            retry_with="Use a repository under AGENT_ALLOWED_REPO_ROOTS or update the allowlist.",
+            escalate=True,
+            correlation_id=correlation_id,
+            extra={"allowed_roots": [str(root) for root in ALLOWED_REPO_ROOTS]},
+        )
 
     verbose_requested = bool(payload.get("verbose"))
     if verbose_requested and not ALLOW_VERBOSE:
-        return {"error": "Verbose mode is disabled by server policy", "correlation_id": correlation_id}
+        return _error_payload(
+            error_code="VERBOSE_MODE_DISABLED",
+            message="Verbose mode is disabled by server policy",
+            retry_with="Set verbose to false, or enable AGENT_ALLOW_VERBOSE=true if policy permits.",
+            escalate=False,
+            correlation_id=correlation_id,
+        )
 
     token = set_tool_correlation_id(correlation_id)
     try:
@@ -368,14 +426,34 @@ class Handler(BaseHTTPRequestHandler):
                 correlation_id=correlation_id,
             )
         else:
-            self._respond(404, {"error": "not found", "correlation_id": correlation_id}, correlation_id=correlation_id)
+            self._respond(
+                404,
+                _error_payload(
+                    error_code="NOT_FOUND",
+                    message="not found",
+                    retry_with="Use /ping (GET) or /analyze (POST).",
+                    escalate=False,
+                    correlation_id=correlation_id,
+                ),
+                correlation_id=correlation_id,
+            )
 
     def do_POST(self) -> None:
         """Handle POST requests."""
         correlation_id = _request_correlation_id(self.headers)
 
         if self.path != "/analyze":
-            self._respond(404, {"error": "not found", "correlation_id": correlation_id}, correlation_id=correlation_id)
+            self._respond(
+                404,
+                _error_payload(
+                    error_code="NOT_FOUND",
+                    message="not found",
+                    retry_with="Use POST /analyze.",
+                    escalate=False,
+                    correlation_id=correlation_id,
+                ),
+                correlation_id=correlation_id,
+            )
             return
 
         if not _is_authorized(self.headers):
@@ -384,7 +462,13 @@ class Handler(BaseHTTPRequestHandler):
                 extra_headers["WWW-Authenticate"] = 'Bearer realm="module2-repo-analysis", error="invalid_token"'
             self._respond(
                 401,
-                {"error": "unauthorized", "correlation_id": correlation_id},
+                _error_payload(
+                    error_code="UNAUTHORIZED",
+                    message="unauthorized",
+                    retry_with="Provide a valid X-API-Key or Authorization Bearer token.",
+                    escalate=False,
+                    correlation_id=correlation_id,
+                ),
                 correlation_id=correlation_id,
                 extra_headers=extra_headers,
             )
@@ -392,14 +476,30 @@ class Handler(BaseHTTPRequestHandler):
 
         client_ip = self.client_address[0] if self.client_address else "unknown"
         if _is_rate_limited(client_ip):
-            self._respond(429, {"error": "rate limit exceeded", "correlation_id": correlation_id}, correlation_id=correlation_id)
+            self._respond(
+                429,
+                _error_payload(
+                    error_code="RATE_LIMIT_EXCEEDED",
+                    message="rate limit exceeded",
+                    retry_with="Retry after the rate-limit window or reduce request frequency.",
+                    escalate=False,
+                    correlation_id=correlation_id,
+                ),
+                correlation_id=correlation_id,
+            )
             return
 
         content_type = self.headers.get("Content-Type", "")
         if "application/json" not in content_type:
             self._respond(
                 415,
-                {"error": "Content-Type must be application/json", "correlation_id": correlation_id},
+                _error_payload(
+                    error_code="UNSUPPORTED_MEDIA_TYPE",
+                    message="Content-Type must be application/json",
+                    retry_with="Set Content-Type: application/json and resend the request.",
+                    escalate=False,
+                    correlation_id=correlation_id,
+                ),
                 correlation_id=correlation_id,
             )
             return
@@ -407,34 +507,98 @@ class Handler(BaseHTTPRequestHandler):
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
-            self._respond(400, {"error": "invalid Content-Length", "correlation_id": correlation_id}, correlation_id=correlation_id)
+            self._respond(
+                400,
+                _error_payload(
+                    error_code="INVALID_CONTENT_LENGTH",
+                    message="invalid Content-Length",
+                    retry_with="Send a numeric Content-Length header.",
+                    escalate=False,
+                    correlation_id=correlation_id,
+                ),
+                correlation_id=correlation_id,
+            )
             return
 
         if length <= 0:
-            self._respond(400, {"error": "request body is required", "correlation_id": correlation_id}, correlation_id=correlation_id)
+            self._respond(
+                400,
+                _error_payload(
+                    error_code="EMPTY_REQUEST_BODY",
+                    message="request body is required",
+                    retry_with="Send a non-empty JSON request body.",
+                    escalate=False,
+                    correlation_id=correlation_id,
+                ),
+                correlation_id=correlation_id,
+            )
             return
 
         if length > MAX_BODY_BYTES:
-            self._respond(413, {"error": "request body too large", "correlation_id": correlation_id}, correlation_id=correlation_id)
+            self._respond(
+                413,
+                _error_payload(
+                    error_code="REQUEST_BODY_TOO_LARGE",
+                    message="request body too large",
+                    retry_with="Reduce payload size or increase AGENT_MAX_BODY_BYTES if policy permits.",
+                    escalate=False,
+                    correlation_id=correlation_id,
+                ),
+                correlation_id=correlation_id,
+            )
             return
 
         try:
             body = json.loads(self.rfile.read(length))
         except json.JSONDecodeError:
-            self._respond(400, {"error": "invalid JSON", "correlation_id": correlation_id}, correlation_id=correlation_id)
+            self._respond(
+                400,
+                _error_payload(
+                    error_code="INVALID_JSON",
+                    message="invalid JSON",
+                    retry_with="Submit valid JSON with double-quoted keys and values where required.",
+                    escalate=False,
+                    correlation_id=correlation_id,
+                ),
+                correlation_id=correlation_id,
+            )
             return
 
         if not isinstance(body, dict):
-            self._respond(400, {"error": "JSON body must be an object", "correlation_id": correlation_id}, correlation_id=correlation_id)
+            self._respond(
+                400,
+                _error_payload(
+                    error_code="INVALID_REQUEST_SHAPE",
+                    message="JSON body must be an object",
+                    retry_with="Send a top-level JSON object like {\"repo_path\": \"/abs/path\"}.",
+                    escalate=False,
+                    correlation_id=correlation_id,
+                ),
+                correlation_id=correlation_id,
+            )
             return
 
         body["_correlation_id"] = correlation_id
 
         try:
-            self._respond(200, _handle_analysis(body), correlation_id=correlation_id)
+            result = _handle_analysis(body)
+            if "error_code" in result:
+                self._respond(400, result, correlation_id=correlation_id)
+            else:
+                self._respond(200, result, correlation_id=correlation_id)
         except Exception:
             # Avoid leaking internals over the API.
-            self._respond(500, {"error": "internal server error", "correlation_id": correlation_id}, correlation_id=correlation_id)
+            self._respond(
+                500,
+                _error_payload(
+                    error_code="INTERNAL_SERVER_ERROR",
+                    message="internal server error",
+                    retry_with="Retry once; if the issue persists, escalate with correlation_id for support.",
+                    escalate=True,
+                    correlation_id=correlation_id,
+                ),
+                correlation_id=correlation_id,
+            )
 
     def _respond(
         self,
@@ -474,7 +638,7 @@ def run_server(host: str = "127.0.0.1", port: int = 8081) -> None:
     mock = os.getenv("AGENT_MOCK_REPO", "false").lower() == "true"
     key_required = bool(os.getenv("AGENT_API_KEY", "").strip())
     jwt_required = JWT_ENABLED
-    
+
     print(f"  🚀  Module 2 Repository Analysis Agent HTTP Server")
     print(f"      http://{host}:{port}/analyze  (POST)")
     print(f"      http://{host}:{port}/ping     (GET)")

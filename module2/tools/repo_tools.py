@@ -35,6 +35,51 @@ from langchain_core.tools import tool
 
 # Mock mode flag
 _MOCK = os.getenv("AGENT_MOCK_REPO", "false").lower() == "true"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def _parse_allowed_roots() -> list[Path]:
+    """Parse repository root allowlist from environment."""
+    raw = os.getenv("AGENT_ALLOWED_REPO_ROOTS", "")
+    if not raw.strip():
+        return [PROJECT_ROOT]
+
+    roots: list[Path] = []
+    for item in raw.split(os.pathsep):
+        value = item.strip()
+        if not value:
+            continue
+        root = Path(value).expanduser().resolve()
+        if root.exists() and root.is_dir():
+            roots.append(root)
+
+    return roots if roots else [PROJECT_ROOT]
+
+
+ALLOWED_REPO_ROOTS = _parse_allowed_roots()
+
+
+def _validate_repo_path(repo_path: str) -> Path:
+    """Validate repo path for all tool operations."""
+    if not repo_path or not repo_path.strip():
+        raise ValueError("Repository path is required")
+
+    path_obj = Path(repo_path).expanduser()
+    if not path_obj.is_absolute():
+        raise ValueError("Repository path must be an absolute path")
+
+    resolved = path_obj.resolve()
+    if not resolved.exists() or not resolved.is_dir():
+        raise ValueError("Repository path does not exist or is not a directory")
+
+    if not (resolved / ".git").exists():
+        raise ValueError("Not a git repository (missing .git directory)")
+
+    allowed = any(resolved == root or root in resolved.parents for root in ALLOWED_REPO_ROOTS)
+    if not allowed:
+        raise ValueError("Repository path is outside allowed roots")
+
+    return resolved
 
 
 # ---------------------------------------------------------------------------
@@ -194,12 +239,7 @@ def scan_repository_structure(repo_path: str) -> str:
         return _wrap(_MOCK_REPO_STRUCTURE, "scan_repository_structure")
 
     try:
-        repo_path_obj = Path(repo_path).resolve()
-        if not repo_path_obj.exists():
-            return _wrap({"error": f"Repository path does not exist: {repo_path}"}, "scan_repository_structure")
-
-        if not (repo_path_obj / ".git").exists():
-            return _wrap({"error": f"Not a git repository: {repo_path}"}, "scan_repository_structure")
+        repo_path_obj = _validate_repo_path(repo_path)
 
         files = []
         directories = set()
@@ -259,7 +299,7 @@ def _read_file_content_impl(repo_path: str, file_path: str) -> str:
         return _wrap({"error": f"File not found in mock data: {file_path}"}, "read_file_content")
 
     try:
-        repo_path_obj = Path(repo_path).resolve()
+        repo_path_obj = _validate_repo_path(repo_path)
         full_path = (repo_path_obj / file_path).resolve()
 
         # Security: ensure file is within repo
@@ -359,6 +399,9 @@ def detect_applications(repo_path: str, file_tree: str) -> str:
         }, "detect_applications")
 
     try:
+        # Validate even though file_tree is passed in, to enforce policy consistently.
+        _validate_repo_path(repo_path)
+
         tree_data = json.loads(file_tree)
         if "error" in tree_data.get("data", {}):
             return _wrap({"error": "Invalid file tree data"}, "detect_applications")

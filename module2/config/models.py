@@ -24,6 +24,7 @@ broader LangChain ecosystem.
 from __future__ import annotations
 
 import os
+import re
 from typing import Any
 
 from langchain_aws import ChatBedrock
@@ -33,6 +34,42 @@ CLAUDE_SONNET_4_CRI = "us.anthropic.claude-sonnet-4-20250514-v1:0"
 
 # Single-region model ID (fallback)
 CLAUDE_SONNET_4_DIRECT = "anthropic.claude-sonnet-4-20250514-v1:0"
+
+_REGION_PATTERN = re.compile(r"^[a-z]{2}-[a-z]+-\d+$")
+_MAX_TOKENS_LIMIT = 8192
+
+
+def _parse_allowed_model_ids() -> set[str]:
+    """Return allowed model IDs from env or secure defaults."""
+    configured = os.getenv("AGENT_ALLOWED_MODEL_IDS", "").strip()
+    if configured:
+        return {model_id.strip() for model_id in configured.split(",") if model_id.strip()}
+
+    return {
+        CLAUDE_SONNET_4_CRI,
+        CLAUDE_SONNET_4_DIRECT,
+    }
+
+
+def _validate_region(region: str) -> str:
+    """Validate AWS region format."""
+    if not _REGION_PATTERN.match(region):
+        raise ValueError(f"Invalid AWS region format: {region}")
+    return region
+
+
+def _validate_temperature(temperature: float) -> float:
+    """Validate model temperature range."""
+    if not (0.0 <= temperature <= 1.0):
+        raise ValueError("temperature must be between 0.0 and 1.0")
+    return temperature
+
+
+def _validate_max_tokens(max_tokens: int) -> int:
+    """Validate token budget to avoid excessive outputs/cost."""
+    if max_tokens < 1 or max_tokens > _MAX_TOKENS_LIMIT:
+        raise ValueError(f"max_tokens must be between 1 and {_MAX_TOKENS_LIMIT}")
+    return max_tokens
 
 
 def get_chat_bedrock_model(
@@ -83,15 +120,32 @@ def get_chat_bedrock_model(
     >>> response = model.invoke("Analyze this repository...")
     """
     aws_region = region or os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-east-1"
+    aws_region = _validate_region(aws_region)
+
+    allowed_model_ids = _parse_allowed_model_ids()
+    if model_id not in allowed_model_ids:
+        raise ValueError(
+            "Model ID is not allowed by policy. "
+            f"Configured allowlist size: {len(allowed_model_ids)}"
+        )
+
+    validated_temperature = _validate_temperature(temperature)
+    validated_max_tokens = _validate_max_tokens(max_tokens)
+
+    user_model_kwargs = kwargs.pop("model_kwargs", {})
+    if not isinstance(user_model_kwargs, dict):
+        raise TypeError("model_kwargs must be a dictionary")
+
+    # Enforce validated generation controls even if caller passes model_kwargs.
+    merged_model_kwargs = dict(user_model_kwargs)
+    merged_model_kwargs["temperature"] = validated_temperature
+    merged_model_kwargs["max_tokens"] = validated_max_tokens
 
     # LangChain ChatBedrock configuration
     return ChatBedrock(
         model_id=model_id,
         region_name=aws_region,
-        model_kwargs={
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        },
+        model_kwargs=merged_model_kwargs,
         streaming=streaming,
         **kwargs,
     )

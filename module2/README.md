@@ -210,6 +210,23 @@ If `AGENT_ALLOWED_MODEL_IDS` is not set, defaults are:
 - `us.anthropic.claude-sonnet-4-20250514-v1:0`
 - `anthropic.claude-sonnet-4-20250514-v1:0`
 
+### Tool Telemetry Envelope
+
+Every Module 2 tool call now emits a standardized envelope with:
+
+- `tool` (tool name)
+- `input` (input parameters, with long string values truncated for log safety)
+- `status` (`success` or `error`)
+- `latency_ms` (execution time in milliseconds)
+- `correlation_id` (request/trace identifier)
+
+Correlation ID behavior:
+
+- Incoming `X-Correlation-ID` is accepted when provided.
+- If missing, a UUID is generated.
+- The server returns `X-Correlation-ID` on responses.
+- The same value is propagated into downstream tool telemetry for request-level traceability.
+
 ## LangSmith Tracing
 
 Enable LangSmith for detailed observability:

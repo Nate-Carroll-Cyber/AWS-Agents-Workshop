@@ -24,6 +24,7 @@ explicit state management and better observability through its graph structure.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 from typing import Any
 
 from langgraph.prebuilt import create_react_agent
@@ -32,6 +33,51 @@ from langchain_core.runnables import Runnable
 from module2.config.models import get_chat_bedrock_model
 from module2.prompts.system_prompts import SYSTEM_PROMPT
 from module2.tools.repo_tools import ALL_TOOLS
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+def _parse_allowed_roots() -> list[Path]:
+    """Parse repository root allowlist for agent-level path validation."""
+    raw = os.getenv("AGENT_ALLOWED_REPO_ROOTS", "")
+    if not raw.strip():
+        return [PROJECT_ROOT]
+
+    roots: list[Path] = []
+    for item in raw.split(os.pathsep):
+        value = item.strip()
+        if not value:
+            continue
+        path_obj = Path(value).expanduser().resolve()
+        if path_obj.exists() and path_obj.is_dir():
+            roots.append(path_obj)
+
+    return roots if roots else [PROJECT_ROOT]
+
+
+def _validate_repo_path(repo_path: str) -> Path:
+    """Validate repository path for all agent invocation paths, not only HTTP."""
+    if not repo_path or not repo_path.strip():
+        raise ValueError("repo_path is required")
+
+    path_obj = Path(repo_path).expanduser()
+    if not path_obj.is_absolute():
+        raise ValueError("repo_path must be an absolute path")
+
+    resolved = path_obj.resolve()
+    if not resolved.exists() or not resolved.is_dir():
+        raise ValueError("repo_path must point to an existing directory")
+
+    if not (resolved / ".git").exists():
+        raise ValueError("repo_path must point to a git repository")
+
+    allowed_roots = _parse_allowed_roots()
+    allowed = any(resolved == root or root in resolved.parents for root in allowed_roots)
+    if not allowed:
+        raise ValueError("repo_path is outside allowed roots")
+
+    return resolved
 
 
 # ---------------------------------------------------------------------------
@@ -80,6 +126,9 @@ def create_agent(
     >>> result = agent.invoke({"messages": [("user", "Analyze repository at /path/to/repo")]})
     >>> print(result["messages"][-1].content)
     """
+    if max_iterations < 1:
+        raise ValueError("max_iterations must be >= 1")
+
     aws_region = region or os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-east-1"
 
     # ── REASONING LAYER ──────────────────────────────────────────────────────
@@ -101,7 +150,8 @@ def create_agent(
         prompt=SYSTEM_PROMPT,
     )
 
-    return agent
+    # ReAct agents can loop; bound recursion to constrain runaway tool calls.
+    return agent.with_config({"recursion_limit": max_iterations * 3})
 
 
 # ---------------------------------------------------------------------------
@@ -204,9 +254,10 @@ def analyze_repository(repo_path: str, verbose: bool = True) -> dict[str, Any]:
     >>> results = analyze_repository("/path/to/my-repo")
     >>> print(f"Found {len(results['applications'])} applications")
     """
+    validated_repo = _validate_repo_path(repo_path)
     agent = create_agent(verbose=verbose)
     
-    query = f"""Analyze the git repository at: {repo_path}
+    query = f"""Analyze the git repository at: {str(validated_repo)}
 
 Please:
 1. Scan the repository structure
@@ -224,7 +275,7 @@ Return the results as structured JSON."""
     final_output = messages[-1].content if messages else ""
     
     return {
-        "repo_path": repo_path,
+        "repo_path": str(validated_repo),
         "output": final_output,
         "messages": messages,
     }

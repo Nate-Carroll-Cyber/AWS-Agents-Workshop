@@ -118,9 +118,12 @@ python module2/app.py
 
 # Analyze repository
 curl -X POST http://localhost:8081/analyze \
+  -H "Accept: application/json" \
   -H "Content-Type: application/json" \
   -d '{"repo_path": "/path/to/repo"}'
 ```
+
+For hardened deployments, include one auth header (`X-API-Key` or `Authorization: Bearer ...`) and a UUID correlation ID in `X-Correlation-ID`.
 
 ### HTTP Security Hardening
 
@@ -143,6 +146,8 @@ Default response security headers:
 - `Referrer-Policy: no-referrer`
 - `X-Frame-Options: DENY`
 - `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'`
+
+Note: these are response headers returned by the API, not request headers sent by curl.
 
 When JWT auth is enabled, `401` responses include `WWW-Authenticate: Bearer ...`.
 
@@ -173,6 +178,8 @@ export AGENT_ALLOWED_REPO_ROOTS="/Users/you/repos:/opt/work/repos"
 python module2/app.py
 
 curl -X POST http://localhost:8081/analyze \
+  -H "Accept: application/json" \
+  -H "X-Correlation-ID: 550e8400-e29b-41d4-a716-446655440000" \
   -H "X-API-Key: $AGENT_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"repo_path": "/Users/you/repos/my-app"}'
@@ -190,6 +197,8 @@ export AGENT_JWT_REQUIRED_ROLES="devops"
 python module2/app.py
 
 curl -X POST http://localhost:8081/analyze \
+  -H "Accept: application/json" \
+  -H "X-Correlation-ID: 550e8400-e29b-41d4-a716-446655440000" \
   -H "Authorization: Bearer <jwt-token>" \
   -H "Content-Type: application/json" \
   -d '{"repo_path": "/Users/you/repos/my-app"}'
@@ -233,8 +242,8 @@ Every Module 2 tool call now emits a standardized envelope with:
 
 Correlation ID behavior:
 
-- Incoming `X-Correlation-ID` is accepted when provided.
-- If missing, a UUID is generated.
+- Incoming `X-Correlation-ID` is accepted when provided in UUID format.
+- Invalid or missing correlation IDs are replaced with a generated UUID.
 - The server returns `X-Correlation-ID` on responses.
 - The same value is propagated into downstream tool telemetry for request-level traceability.
 

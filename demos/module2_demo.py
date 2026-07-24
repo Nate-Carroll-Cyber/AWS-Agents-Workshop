@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -85,6 +86,32 @@ def pause(msg: str = "  ↵  Press Enter to continue...") -> None:
         input(msg)
     except KeyboardInterrupt:
         sys.exit(0)
+
+
+def _extract_final_message_content(response: dict[str, Any]) -> str:
+    """Handle LangGraph response content that may be text blocks or plain strings."""
+    messages = response.get("messages", [])
+    if not messages:
+        return ""
+
+    final = messages[-1]
+    content = getattr(final, "content", final)
+
+    if isinstance(content, str):
+        return content
+
+    if isinstance(content, list):
+        chunks: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                chunks.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    chunks.append(text)
+        return "\n".join(chunks)
+
+    return str(content)
 
 
 # ---------------------------------------------------------------------------
@@ -477,7 +504,14 @@ def scan_repository_structure(repo_path: str) -> str:
     \"\"\"
     # Implementation here
     file_tree = get_file_tree(repo_path)
-    return json.dumps({"file_tree": file_tree, "tool": "scan_repository_structure"})
+    return json.dumps({
+        "tool": "scan_repository_structure",
+        "input": {"repo_path": repo_path},
+        "status": "success",
+        "latency_ms": 12,
+        "correlation_id": "<uuid>",
+        "data": {"file_tree": file_tree},
+    })
     """)
 
     concept(
@@ -594,16 +628,19 @@ User: "Analyze the repository at /mock/repo"
 
 Agent Think: I need to first scan the repository structure
 Agent Act:   scan_repository_structure(repo_path="/mock/repo")
-Agent Observe: {"file_tree": "...", "dependency_files": ["package.json"]}
+Agent Observe: {"tool": "scan_repository_structure", "status": "success", "latency_ms": 9,
+                "correlation_id": "<uuid>", "data": {"file_tree": "...", "dependency_files": ["package.json"]}}
 
 Agent Think: I found a package.json, let me read it
 Agent Act:   read_file_content(repo_path="/mock/repo", file_path="package.json")
-Agent Observe: {"content": "{\\"dependencies\\": {\\"express\\": \\"^4.18.0\\"}}"}
+Agent Observe: {"tool": "read_file_content", "status": "success", "latency_ms": 5,
+                "correlation_id": "<uuid>", "data": {"content": "{\\"dependencies\\": {\\"express\\": \\"^4.18.0\\"}}"}}
 
 Agent Think: Now I can analyze the dependencies
 Agent Act:   analyze_dependencies(repo_path="/mock/repo", app_path=".", 
                                    dependency_file="package.json")
-Agent Observe: {"language": "Node.js", "dependencies": ["express"]}
+Agent Observe: {"tool": "analyze_dependencies", "status": "success", "latency_ms": 8,
+                "correlation_id": "<uuid>", "data": {"language": "Node.js", "dependencies": ["express"]}}
 
 Agent Respond: "This is a Node.js application using Express framework..."
     """)
@@ -750,7 +787,8 @@ agent = create_react_agent(
     print("    • Framework handles serialization\n")
     print("  LangChain:")
     print("    • Returns strings (typically JSON)")
-    print("    • Tool is responsible for formatting\n")
+    print("    • Tool is responsible for formatting")
+    print("    • Module 2 includes telemetry envelope + standard error contract\n")
 
     print("\n  Example Tool Outputs:\n")
     code_block("""
@@ -763,11 +801,28 @@ agent = create_react_agent(
 
 # LangChain Tool Output (JSON string)
 '{
+    "tool": "scan_repository_structure",
+    "status": "success",
+    "latency_ms": 7,
+    "correlation_id": "<uuid>",
     "data": {
         "file_tree": "...",
         "dependency_files": ["package.json"]
-    },
-    "tool": "scan_repository_structure"
+    }
+}'
+
+# Standardized LangChain tool error envelope
+'{
+    "tool": "read_file_content",
+    "status": "error",
+    "latency_ms": 3,
+    "correlation_id": "<uuid>",
+    "data": {
+        "error_code": "FILE_NOT_FOUND",
+        "error": "File not found: missing.txt",
+        "retry_with": "Verify file_path and try again.",
+        "escalate": false
+    }
 }'
     """)
 
@@ -797,7 +852,7 @@ agent = create_react_agent(
 # Section 7 — Repository Scan
 # ---------------------------------------------------------------------------
 
-def section_7_repository_scan(agent) -> None:
+def section_7_repository_scan(agent, repo_target: str) -> None:
     header("SECTION 7 — Repository Structure Scan", "green")
     box(
         "First step: Understanding the repository layout",
@@ -811,11 +866,11 @@ def section_7_repository_scan(agent) -> None:
         "and config files (Dockerfile, terraform files) to understand the stack."
     )
 
-    q = "Scan the repository structure at /mock/repo and tell me what you find."
+    q = f"Scan the repository structure at {repo_target} and tell me what you find."
     user_says(q)
     print()
     response = agent.invoke({"messages": [("user", q)]})
-    final_msg = response["messages"][-1].content
+    final_msg = _extract_final_message_content(response)
     print(f"\n  AGENT › {final_msg}\n")
     pause()
 
@@ -824,7 +879,7 @@ def section_7_repository_scan(agent) -> None:
 # Section 8 — Application Detection
 # ---------------------------------------------------------------------------
 
-def section_8_application_detection(agent) -> None:
+def section_8_application_detection(agent, repo_target: str) -> None:
     header("SECTION 8 — Multi-Application Detection", "blue")
     box(
         "Identifying distinct applications in a monorepo",
@@ -838,11 +893,11 @@ def section_8_application_detection(agent) -> None:
         "enabling separate stack analysis for each application."
     )
 
-    q = "Detect all applications in the repository at /mock/repo. How many are there?"
+    q = f"Detect all applications in the repository at {repo_target}. How many are there?"
     user_says(q)
     print()
     response = agent.invoke({"messages": [("user", q)]})
-    final_msg = response["messages"][-1].content
+    final_msg = _extract_final_message_content(response)
     print(f"\n  AGENT › {final_msg}\n")
     pause()
 
@@ -851,7 +906,7 @@ def section_8_application_detection(agent) -> None:
 # Section 9 — Dependency Analysis and AWS Mapping
 # ---------------------------------------------------------------------------
 
-def section_9_dependency_analysis(agent) -> None:
+def section_9_dependency_analysis(agent, repo_target: str) -> None:
     header("SECTION 9 — Stack Analysis & AWS Service Mapping", "yellow")
     box(
         "From dependencies to AWS infrastructure requirements",
@@ -865,7 +920,7 @@ def section_9_dependency_analysis(agent) -> None:
         "'boto3' → S3/AWS SDK. It builds a complete infrastructure requirements list."
     )
 
-    q = """For the repository at /mock/repo, for each application you detected:
+    q = f"""For the repository at {repo_target}, for each application you detected:
 1. Analyze its dependencies
 2. Identify the technology stack (language, framework)
 3. Map dependencies to AWS infrastructure services
@@ -874,7 +929,7 @@ def section_9_dependency_analysis(agent) -> None:
     user_says(q)
     print()
     response = agent.invoke({"messages": [("user", q)]})
-    final_msg = response["messages"][-1].content
+    final_msg = _extract_final_message_content(response)
     print(f"\n  AGENT › {final_msg}\n")
     pause()
 
@@ -928,7 +983,7 @@ def section_10_langsmith_tracing() -> None:
 # Section 11 — Full Analysis Workflow
 # ---------------------------------------------------------------------------
 
-def section_11_full_workflow(agent) -> None:
+def section_11_full_workflow(agent, repo_target: str) -> None:
     header("SECTION 11 — Complete Analysis Pipeline", "red")
     box(
         "End-to-end repository analysis",
@@ -942,7 +997,7 @@ def section_11_full_workflow(agent) -> None:
         "(the AWS Infrastructure Agent) to check existing resources and identify gaps."
     )
 
-    q = """Perform a complete analysis of the repository at /mock/repo:
+    q = f"""Perform a complete analysis of the repository at {repo_target}:
 
 1. Scan the repository structure
 2. Detect all applications/services
@@ -961,7 +1016,7 @@ Format the final report as structured JSON."""
     user_says(q)
     print()
     response = agent.invoke({"messages": [("user", q)]})
-    final_msg = response["messages"][-1].content
+    final_msg = _extract_final_message_content(response)
     print(f"\n  AGENT › {final_msg}\n")
     
     concept(
@@ -984,6 +1039,7 @@ def main() -> None:
     args = parser.parse_args()
 
     # Set mock mode if no real repo provided
+    repo_target = args.repo or "/mock/repo"
     if not args.repo:
         os.environ["AGENT_MOCK_REPO"] = "true"
         print("  Mock mode ON  (pass --repo /path to analyze a real repository)\n")
@@ -1015,11 +1071,11 @@ def main() -> None:
         4: section_4_chains_concept,
         5: section_5_tools_in_langchain,
         6: section_6_tools_comparison,
-        7: lambda: section_7_repository_scan(agent),
-        8: lambda: section_8_application_detection(agent),
-        9: lambda: section_9_dependency_analysis(agent),
+        7: lambda: section_7_repository_scan(agent, repo_target),
+        8: lambda: section_8_application_detection(agent, repo_target),
+        9: lambda: section_9_dependency_analysis(agent, repo_target),
         10: section_10_langsmith_tracing,
-        11: lambda: section_11_full_workflow(agent),
+        11: lambda: section_11_full_workflow(agent, repo_target),
     }
 
     if args.section:

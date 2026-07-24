@@ -27,9 +27,12 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
+from contextvars import ContextVar, Token
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from langchain_core.tools import tool
 
@@ -57,6 +60,22 @@ def _parse_allowed_roots() -> list[Path]:
 
 
 ALLOWED_REPO_ROOTS = _parse_allowed_roots()
+_TOOL_CORRELATION_ID: ContextVar[str | None] = ContextVar("tool_correlation_id", default=None)
+
+
+def set_tool_correlation_id(correlation_id: str) -> Token:
+    """Set correlation ID for downstream tool calls within current context."""
+    return _TOOL_CORRELATION_ID.set(correlation_id)
+
+
+def reset_tool_correlation_id(token: Token) -> None:
+    """Reset correlation ID context after request completes."""
+    _TOOL_CORRELATION_ID.reset(token)
+
+
+def _current_correlation_id() -> str:
+    """Get active correlation ID or generate one for standalone tool invocations."""
+    return _TOOL_CORRELATION_ID.get() or str(uuid4())
 
 
 def _validate_repo_path(repo_path: str) -> Path:
@@ -135,6 +154,43 @@ def _wrap(data: Any, tool_name: str) -> str:
     return json.dumps(
         {
             "tool": tool_name,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "mock_mode": _MOCK,
+            "data": data,
+        },
+        indent=2,
+        default=str,
+    )
+
+
+def _sanitize_input(value: Any) -> Any:
+    """Keep telemetry input fields compact and safe to log."""
+    if isinstance(value, str) and len(value) > 1000:
+        return {
+            "truncated": True,
+            "length": len(value),
+            "preview": value[:1000],
+        }
+    return value
+
+
+def _emit_tool_result(
+    *,
+    tool_name: str,
+    input_params: dict[str, Any],
+    started_at: float,
+    data: Any,
+) -> str:
+    """Emit a telemetry-rich response envelope for every tool call."""
+    status = "error" if isinstance(data, dict) and "error" in data else "success"
+    latency_ms = int((time.perf_counter() - started_at) * 1000)
+    return json.dumps(
+        {
+            "tool": tool_name,
+            "input": {k: _sanitize_input(v) for k, v in input_params.items()},
+            "status": status,
+            "latency_ms": latency_ms,
+            "correlation_id": _current_correlation_id(),
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "mock_mode": _MOCK,
             "data": data,
@@ -235,8 +291,16 @@ def scan_repository_structure(repo_path: str) -> str:
     str
         JSON with file tree, dependency files, config files, and statistics.
     """
+    started_at = time.perf_counter()
+    input_params = {"repo_path": repo_path}
+
     if _MOCK:
-        return _wrap(_MOCK_REPO_STRUCTURE, "scan_repository_structure")
+        return _emit_tool_result(
+            tool_name="scan_repository_structure",
+            input_params=input_params,
+            started_at=started_at,
+            data=_MOCK_REPO_STRUCTURE,
+        )
 
     try:
         repo_path_obj = _validate_repo_path(repo_path)
@@ -272,7 +336,11 @@ def scan_repository_structure(repo_path: str) -> str:
                 if _is_config_file(filename):
                     config_files.append(rel_path_str)
 
-        return _wrap({
+        return _emit_tool_result(
+            tool_name="scan_repository_structure",
+            input_params=input_params,
+            started_at=started_at,
+            data={
             "repo_path": str(repo_path_obj),
             "total_files": len(files),
             "total_directories": len(directories),
@@ -280,10 +348,16 @@ def scan_repository_structure(repo_path: str) -> str:
             "directories": sorted(list(directories))[:50],
             "dependency_files": dependency_files,
             "config_files": config_files,
-        }, "scan_repository_structure")
+            },
+        )
 
     except Exception as exc:
-        return _wrap({"error": str(exc)}, "scan_repository_structure")
+        return _emit_tool_result(
+            tool_name="scan_repository_structure",
+            input_params=input_params,
+            started_at=started_at,
+            data={"error": str(exc)},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -292,11 +366,24 @@ def scan_repository_structure(repo_path: str) -> str:
 
 def _read_file_content_impl(repo_path: str, file_path: str) -> str:
     """Internal implementation of read_file_content."""
+    started_at = time.perf_counter()
+    input_params = {"repo_path": repo_path, "file_path": file_path}
+
     if _MOCK:
         content = _MOCK_FILE_CONTENTS.get(file_path)
         if content:
-            return _wrap({"file_path": file_path, "content": content, "size": len(content)}, "read_file_content")
-        return _wrap({"error": f"File not found in mock data: {file_path}"}, "read_file_content")
+            return _emit_tool_result(
+                tool_name="read_file_content",
+                input_params=input_params,
+                started_at=started_at,
+                data={"file_path": file_path, "content": content, "size": len(content)},
+            )
+        return _emit_tool_result(
+            tool_name="read_file_content",
+            input_params=input_params,
+            started_at=started_at,
+            data={"error": f"File not found in mock data: {file_path}"},
+        )
 
     try:
         repo_path_obj = _validate_repo_path(repo_path)
@@ -304,30 +391,55 @@ def _read_file_content_impl(repo_path: str, file_path: str) -> str:
 
         # Security: ensure file is within repo
         if not str(full_path).startswith(str(repo_path_obj)):
-            return _wrap({"error": "File path outside repository"}, "read_file_content")
+            return _emit_tool_result(
+                tool_name="read_file_content",
+                input_params=input_params,
+                started_at=started_at,
+                data={"error": "File path outside repository"},
+            )
 
         if not full_path.exists():
-            return _wrap({"error": f"File not found: {file_path}"}, "read_file_content")
+            return _emit_tool_result(
+                tool_name="read_file_content",
+                input_params=input_params,
+                started_at=started_at,
+                data={"error": f"File not found: {file_path}"},
+            )
 
         # Read file (limit size for context window)
         max_size = 50000  # ~50KB
         file_size = full_path.stat().st_size
         if file_size > max_size:
-            return _wrap({
+            return _emit_tool_result(
+                tool_name="read_file_content",
+                input_params=input_params,
+                started_at=started_at,
+                data={
                 "error": f"File too large ({file_size} bytes, max {max_size})",
                 "hint": "File is too large to read completely. Consider reading specific sections.",
-            }, "read_file_content")
+                },
+            )
 
         content = full_path.read_text(encoding="utf-8", errors="ignore")
 
-        return _wrap({
+        return _emit_tool_result(
+            tool_name="read_file_content",
+            input_params=input_params,
+            started_at=started_at,
+            data={
             "file_path": file_path,
             "content": content,
             "size": file_size,
-        }, "read_file_content")
+            },
+        )
 
     except Exception as exc:
-        return _wrap({"error": str(exc)}, "read_file_content")
+        return _emit_tool_result(
+            tool_name="read_file_content",
+            input_params=input_params,
+            started_at=started_at,
+            data={"error": str(exc)},
+        )
 
 
 @tool
@@ -379,8 +491,15 @@ def detect_applications(repo_path: str, file_tree: str) -> str:
     str
         JSON with detected applications and their locations.
     """
+    started_at = time.perf_counter()
+    input_params = {"repo_path": repo_path, "file_tree": file_tree}
+
     if _MOCK:
-        return _wrap({
+        return _emit_tool_result(
+            tool_name="detect_applications",
+            input_params=input_params,
+            started_at=started_at,
+            data={
             "applications": [
                 {
                     "name": "api-service",
@@ -396,7 +515,8 @@ def detect_applications(repo_path: str, file_tree: str) -> str:
                 },
             ],
             "total_applications": 2,
-        }, "detect_applications")
+            },
+        )
 
     try:
         # Validate even though file_tree is passed in, to enforce policy consistently.
@@ -404,7 +524,12 @@ def detect_applications(repo_path: str, file_tree: str) -> str:
 
         tree_data = json.loads(file_tree)
         if "error" in tree_data.get("data", {}):
-            return _wrap({"error": "Invalid file tree data"}, "detect_applications")
+            return _emit_tool_result(
+                tool_name="detect_applications",
+                input_params=input_params,
+                started_at=started_at,
+                data={"error": "Invalid file tree data"},
+            )
 
         data = tree_data.get("data", {})
         dependency_files = data.get("dependency_files", [])
@@ -436,13 +561,23 @@ def detect_applications(repo_path: str, file_tree: str) -> str:
                 "type": "service" if "Dockerfile" in info["indicators"] else "library",
             })
 
-        return _wrap({
+        return _emit_tool_result(
+            tool_name="detect_applications",
+            input_params=input_params,
+            started_at=started_at,
+            data={
             "applications": applications,
             "total_applications": len(applications),
-        }, "detect_applications")
+            },
+        )
 
     except Exception as exc:
-        return _wrap({"error": str(exc)}, "detect_applications")
+        return _emit_tool_result(
+            tool_name="detect_applications",
+            input_params=input_params,
+            started_at=started_at,
+            data={"error": str(exc)},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -471,6 +606,13 @@ def analyze_dependencies(repo_path: str, app_path: str, dependency_file: str) ->
     str
         JSON with parsed dependencies, language, and framework detection.
     """
+    started_at = time.perf_counter()
+    input_params = {
+        "repo_path": repo_path,
+        "app_path": app_path,
+        "dependency_file": dependency_file,
+    }
+
     file_path = f"{app_path}/{dependency_file}" if app_path != "." else dependency_file
 
     # Read the file using internal implementation
@@ -478,7 +620,12 @@ def analyze_dependencies(repo_path: str, app_path: str, dependency_file: str) ->
     file_data = json.loads(file_content_result).get("data", {})
 
     if "error" in file_data:
-        return _wrap(file_data, "analyze_dependencies")
+        return _emit_tool_result(
+            tool_name="analyze_dependencies",
+            input_params=input_params,
+            started_at=started_at,
+            data=file_data,
+        )
 
     content = file_data.get("content", "")
     dependencies = []
@@ -525,17 +672,27 @@ def analyze_dependencies(repo_path: str, app_path: str, dependency_file: str) ->
                 if match:
                     dependencies.append(match.group(1))
 
-        return _wrap({
+        return _emit_tool_result(
+            tool_name="analyze_dependencies",
+            input_params=input_params,
+            started_at=started_at,
+            data={
             "app_path": app_path,
             "dependency_file": dependency_file,
             "language": language,
             "framework": framework,
             "dependencies": dependencies,
             "total_dependencies": len(dependencies),
-        }, "analyze_dependencies")
+            },
+        )
 
     except Exception as exc:
-        return _wrap({"error": str(exc)}, "analyze_dependencies")
+        return _emit_tool_result(
+            tool_name="analyze_dependencies",
+            input_params=input_params,
+            started_at=started_at,
+            data={"error": str(exc)},
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -560,10 +717,18 @@ def map_aws_services(dependencies: str) -> str:
     str
         JSON with AWS service requirements mapped from dependencies.
     """
+    started_at = time.perf_counter()
+    input_params = {"dependencies": dependencies}
+
     try:
         deps_data = json.loads(dependencies).get("data", {})
         if "error" in deps_data:
-            return _wrap(deps_data, "map_aws_services")
+            return _emit_tool_result(
+                tool_name="map_aws_services",
+                input_params=input_params,
+                started_at=started_at,
+                data=deps_data,
+            )
 
         dep_list = deps_data.get("dependencies", [])
         language = deps_data.get("language", "unknown")
@@ -614,7 +779,11 @@ def map_aws_services(dependencies: str) -> str:
                     "note": "HTTP/HTTPS traffic distribution",
                 })
 
-        return _wrap({
+        return _emit_tool_result(
+            tool_name="map_aws_services",
+            input_params=input_params,
+            started_at=started_at,
+            data={
             "language": language,
             "framework": framework,
             "total_dependencies": len(dep_list),
@@ -627,10 +796,16 @@ def map_aws_services(dependencies: str) -> str:
                 "queuing": [s["service"] for s in aws_services.get("queue", [])],
                 "compute": [s["service"] for s in aws_services.get("compute", [])],
             },
-        }, "map_aws_services")
+            },
+        )
 
     except Exception as exc:
-        return _wrap({"error": str(exc)}, "map_aws_services")
+        return _emit_tool_result(
+            tool_name="map_aws_services",
+            input_params=input_params,
+            started_at=started_at,
+            data={"error": str(exc)},
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -21,6 +21,8 @@ USAGE
 
   # Analyze a repository
   curl -X POST http://localhost:8081/analyze \
+        -H "Accept: application/json" \
+        -H "X-Correlation-ID: 550e8400-e29b-41d4-a716-446655440000" \
     -H "Content-Type: application/json" \
     -d '{"repo_path": "/path/to/repo"}'
 """
@@ -37,7 +39,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from threading import Lock
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 try:
     import jwt
@@ -287,10 +289,16 @@ def _handle_analysis(payload: dict) -> dict:
 
 
 def _request_correlation_id(headers: Any) -> str:
-    """Resolve request correlation ID from header or generate one."""
+    """Resolve request correlation ID from header or generate one.
+
+    Accepts only valid UUID values from X-Correlation-ID.
+    """
     incoming = headers.get("X-Correlation-ID", "").strip()
     if incoming and len(incoming) <= 128:
-        return incoming
+        try:
+            return str(UUID(incoming))
+        except ValueError:
+            pass
     return str(uuid4())
 
 
@@ -669,6 +677,8 @@ def run_server(host: str = "127.0.0.1", port: int = 8081) -> None:
         print(f"        - {root}")
     print(f"\n  Example:")
     print(f"    curl -X POST http://localhost:{port}/analyze \\")
+    print(f"      -H 'Accept: application/json' \\")
+    print(f"      -H 'X-Correlation-ID: 550e8400-e29b-41d4-a716-446655440000' \\")
     if key_required:
         print(f"      -H 'X-API-Key: <your-key>' \\")
     if jwt_required and not key_required:

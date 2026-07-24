@@ -174,6 +174,26 @@ def _sanitize_input(value: Any) -> Any:
     return value
 
 
+def _error_data(
+    *,
+    error_code: str,
+    message: str,
+    retry_with: str,
+    escalate: bool,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build a standardized error payload for tool outputs."""
+    payload: dict[str, Any] = {
+        "error_code": error_code,
+        "error": message,
+        "retry_with": retry_with,
+        "escalate": escalate,
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
 def _emit_tool_result(
     *,
     tool_name: str,
@@ -356,7 +376,12 @@ def scan_repository_structure(repo_path: str) -> str:
             tool_name="scan_repository_structure",
             input_params=input_params,
             started_at=started_at,
-            data={"error": str(exc)},
+            data=_error_data(
+                error_code="SCAN_FAILED",
+                message=str(exc),
+                retry_with="Verify repo_path exists, is absolute, and is allowed by AGENT_ALLOWED_REPO_ROOTS.",
+                escalate=False,
+            ),
         )
 
 
@@ -382,7 +407,12 @@ def _read_file_content_impl(repo_path: str, file_path: str) -> str:
             tool_name="read_file_content",
             input_params=input_params,
             started_at=started_at,
-            data={"error": f"File not found in mock data: {file_path}"},
+            data=_error_data(
+                error_code="MOCK_FILE_NOT_FOUND",
+                message=f"File not found in mock data: {file_path}",
+                retry_with="Use a mock fixture path that exists in _MOCK_FILE_CONTENTS or disable AGENT_MOCK_REPO.",
+                escalate=False,
+            ),
         )
 
     try:
@@ -395,7 +425,12 @@ def _read_file_content_impl(repo_path: str, file_path: str) -> str:
                 tool_name="read_file_content",
                 input_params=input_params,
                 started_at=started_at,
-                data={"error": "File path outside repository"},
+                data=_error_data(
+                    error_code="FILE_OUTSIDE_REPO",
+                    message="File path outside repository",
+                    retry_with="Use a file_path relative to repo_path and within repository boundaries.",
+                    escalate=False,
+                ),
             )
 
         if not full_path.exists():
@@ -403,7 +438,12 @@ def _read_file_content_impl(repo_path: str, file_path: str) -> str:
                 tool_name="read_file_content",
                 input_params=input_params,
                 started_at=started_at,
-                data={"error": f"File not found: {file_path}"},
+                data=_error_data(
+                    error_code="FILE_NOT_FOUND",
+                    message=f"File not found: {file_path}",
+                    retry_with="Check file_path spelling and ensure the file exists under repo_path.",
+                    escalate=False,
+                ),
             )
 
         # Read file (limit size for context window)
@@ -414,10 +454,15 @@ def _read_file_content_impl(repo_path: str, file_path: str) -> str:
                 tool_name="read_file_content",
                 input_params=input_params,
                 started_at=started_at,
-                data={
-                "error": f"File too large ({file_size} bytes, max {max_size})",
-                "hint": "File is too large to read completely. Consider reading specific sections.",
-                },
+                data=_error_data(
+                    error_code="FILE_TOO_LARGE",
+                    message=f"File too large ({file_size} bytes, max {max_size})",
+                    retry_with="Read a smaller file or split content into targeted sections.",
+                    escalate=False,
+                    extra={
+                        "hint": "File is too large to read completely. Consider reading specific sections.",
+                    },
+                ),
             )
 
         content = full_path.read_text(encoding="utf-8", errors="ignore")
@@ -438,7 +483,12 @@ def _read_file_content_impl(repo_path: str, file_path: str) -> str:
             tool_name="read_file_content",
             input_params=input_params,
             started_at=started_at,
-            data={"error": str(exc)},
+            data=_error_data(
+                error_code="READ_FILE_FAILED",
+                message=str(exc),
+                retry_with="Verify repo_path and file_path are valid and accessible.",
+                escalate=False,
+            ),
         )
 
 
@@ -528,7 +578,12 @@ def detect_applications(repo_path: str, file_tree: str) -> str:
                 tool_name="detect_applications",
                 input_params=input_params,
                 started_at=started_at,
-                data={"error": "Invalid file tree data"},
+                data=_error_data(
+                    error_code="INVALID_FILE_TREE",
+                    message="Invalid file tree data",
+                    retry_with="Pass the unmodified JSON output from scan_repository_structure into file_tree.",
+                    escalate=False,
+                ),
             )
 
         data = tree_data.get("data", {})
@@ -576,7 +631,12 @@ def detect_applications(repo_path: str, file_tree: str) -> str:
             tool_name="detect_applications",
             input_params=input_params,
             started_at=started_at,
-            data={"error": str(exc)},
+            data=_error_data(
+                error_code="DETECT_APPLICATIONS_FAILED",
+                message=str(exc),
+                retry_with="Ensure file_tree is valid JSON and repo_path is valid.",
+                escalate=False,
+            ),
         )
 
 
@@ -691,7 +751,12 @@ def analyze_dependencies(repo_path: str, app_path: str, dependency_file: str) ->
             tool_name="analyze_dependencies",
             input_params=input_params,
             started_at=started_at,
-            data={"error": str(exc)},
+            data=_error_data(
+                error_code="ANALYZE_DEPENDENCIES_FAILED",
+                message=str(exc),
+                retry_with="Verify dependency_file format and ensure file content is valid for parsing.",
+                escalate=False,
+            ),
         )
 
 
@@ -804,7 +869,12 @@ def map_aws_services(dependencies: str) -> str:
             tool_name="map_aws_services",
             input_params=input_params,
             started_at=started_at,
-            data={"error": str(exc)},
+            data=_error_data(
+                error_code="MAP_AWS_SERVICES_FAILED",
+                message=str(exc),
+                retry_with="Pass valid analyze_dependencies output into dependencies.",
+                escalate=False,
+            ),
         )
 
 

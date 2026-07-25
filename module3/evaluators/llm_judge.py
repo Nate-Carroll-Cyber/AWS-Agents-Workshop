@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 from typing import Any
 
 from langchain_core.prompts import ChatPromptTemplate
@@ -20,6 +21,10 @@ from module3.config.models import get_judge_model
 
 # Mock mode flag
 _MOCK = os.getenv("AGENT_MOCK_REPO", "false").lower() == "true"
+MAX_TASK_DESCRIPTION_CHARS = int(os.getenv("MODULE3_JUDGE_MAX_TASK_DESCRIPTION_CHARS", "4000"))
+MAX_AGENT_OUTPUT_CHARS = int(os.getenv("MODULE3_JUDGE_MAX_AGENT_OUTPUT_CHARS", "50000"))
+MAX_REFERENCE_ANSWER_CHARS = int(os.getenv("MODULE3_JUDGE_MAX_REFERENCE_ANSWER_CHARS", "20000"))
+MAX_CRITERIA = int(os.getenv("MODULE3_JUDGE_MAX_CRITERIA", "20"))
 
 
 # ---------------------------------------------------------------------------
@@ -110,6 +115,94 @@ def create_judge_prompt(
     )
 
 
+def _bounded_text(value: str | None, max_chars: int) -> str:
+    """Bound user/model text size to limit prompt and logging cost."""
+    text = value or ""
+    if len(text) <= max_chars:
+        return text
+    return f"{text[:max_chars]}\n\n[TRUNCATED: original_length={len(text)}]"
+
+
+def _validated_criteria(criteria: dict[str, str]) -> dict[str, str]:
+    """Validate and normalize evaluation criteria."""
+    if not isinstance(criteria, dict):
+        raise TypeError("criteria must be a dictionary of {name: description}")
+    if not criteria:
+        raise ValueError("criteria must include at least one evaluation criterion")
+    if len(criteria) > MAX_CRITERIA:
+        raise ValueError(f"criteria exceeds maximum allowed entries ({MAX_CRITERIA})")
+
+    normalized: dict[str, str] = {}
+    for key, value in criteria.items():
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError("criteria keys must be non-empty strings")
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("criteria descriptions must be non-empty strings")
+        normalized[key.strip()] = value.strip()
+    return normalized
+
+
+def _extract_json_payload(response: str) -> str:
+    """Extract JSON payload from plain text or fenced code block output."""
+    if "```json" in response:
+        return response.split("```json", 1)[1].split("```", 1)[0].strip()
+    if "```" in response:
+        return response.split("```", 1)[1].split("```", 1)[0].strip()
+    return response.strip()
+
+
+def _clamp_score(value: Any) -> int:
+    """Normalize score into integer range 0..100."""
+    try:
+        numeric = int(round(float(value)))
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(100, numeric))
+
+
+def _normalize_judge_result(
+    parsed: dict[str, Any],
+    criteria_keys: list[str],
+) -> dict[str, Any]:
+    """Normalize LLM judge output into a stable, bounded response shape."""
+    raw_scores = parsed.get("scores", {})
+    if not isinstance(raw_scores, dict):
+        raw_scores = {}
+
+    scores = {
+        key: _clamp_score(raw_scores.get(key, 0))
+        for key in criteria_keys
+    }
+
+    overall_score = _clamp_score(
+        parsed.get("overall_score", sum(scores.values()) / max(1, len(scores)))
+    )
+
+    rationale_raw = parsed.get("rationale", {})
+    rationale = rationale_raw if isinstance(rationale_raw, dict) else {}
+
+    strengths = parsed.get("strengths", [])
+    if not isinstance(strengths, list):
+        strengths = []
+
+    weaknesses = parsed.get("weaknesses", [])
+    if not isinstance(weaknesses, list):
+        weaknesses = []
+
+    recommendations = parsed.get("recommendations", [])
+    if not isinstance(recommendations, list):
+        recommendations = []
+
+    return {
+        "scores": scores,
+        "overall_score": overall_score,
+        "rationale": rationale,
+        "strengths": [str(item) for item in strengths[:20]],
+        "weaknesses": [str(item) for item in weaknesses[:20]],
+        "recommendations": [str(item) for item in recommendations[:20]],
+    }
+
+
 def evaluate_with_llm_judge(
     task_description: str,
     agent_output: str,
@@ -157,6 +250,11 @@ def evaluate_with_llm_judge(
     ... )
     >>> print(result["overall_score"])
     """
+    criteria = _validated_criteria(criteria)
+    task_description = _bounded_text(task_description, MAX_TASK_DESCRIPTION_CHARS)
+    agent_output = _bounded_text(agent_output, MAX_AGENT_OUTPUT_CHARS)
+    reference_answer = _bounded_text(reference_answer, MAX_REFERENCE_ANSWER_CHARS) if reference_answer else None
+
     if verbose:
         print("  [LLM Judge] Evaluating agent output...")
         print(f"  [Criteria] {len(criteria)} evaluation criteria")
@@ -167,7 +265,6 @@ def evaluate_with_llm_judge(
             print("  [LLM Judge] Running in MOCK mode")
         
         # Generate mock scores (70-95 range for realistic evaluation)
-        import random
         random.seed(hash(agent_output) % 2**32)  # Deterministic based on output
         
         scores = {name: random.randint(70, 95) for name in criteria.keys()}
@@ -209,15 +306,9 @@ def evaluate_with_llm_judge(
     
     # Parse JSON response
     try:
-        # Extract JSON from response
-        if "```json" in response:
-            json_str = response.split("```json")[1].split("```")[0].strip()
-        elif "```" in response:
-            json_str = response.split("```")[1].split("```")[0].strip()
-        else:
-            json_str = response.strip()
-        
-        result = json.loads(json_str)
+        json_str = _extract_json_payload(response)
+        parsed = json.loads(json_str)
+        result = _normalize_judge_result(parsed, list(criteria.keys()))
         
         if verbose:
             print(f"  [Overall Score] {result.get('overall_score', 'N/A')}/100")
@@ -232,13 +323,12 @@ def evaluate_with_llm_judge(
         
         # Return fallback result
         return {
-            "scores": {},
+            "scores": {name: 0 for name in criteria.keys()},
             "overall_score": 0,
             "rationale": {},
             "strengths": [],
             "weaknesses": ["Failed to parse evaluation response"],
             "recommendations": ["Retry evaluation"],
-            "raw_response": response,
             "error": str(e),
         }
 

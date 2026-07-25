@@ -94,6 +94,60 @@ def pause(msg: str = "  ↵  Press Enter to continue...") -> None:
         sys.exit(0)
 
 
+def _parse_tool_result(raw: str, tool_name: str) -> dict[str, object] | None:
+    """Parse tool JSON and return data payload when successful."""
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        print(f"  ✗  {tool_name} returned invalid JSON")
+        return None
+
+    if not isinstance(payload, dict):
+        print(f"  ✗  {tool_name} returned unexpected payload type")
+        return None
+
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        print(f"  ✗  {tool_name} returned missing or invalid data field")
+        return None
+
+    if "error_code" in data or "error" in data:
+        code = data.get("error_code", "UNKNOWN_ERROR")
+        msg = data.get("error", "tool failed")
+        print(f"  ✗  {tool_name} failed: {code} - {msg}")
+        return None
+
+    return data
+
+
+def _print_security_posture() -> None:
+    """Print effective auth and hardening posture for demo operators."""
+    api_key_configured = bool(os.getenv("MODULE3_API_KEY", "").strip())
+    jwt_enabled = bool(
+        os.getenv("MODULE3_JWT_ISSUER", "").strip()
+        and os.getenv("MODULE3_JWT_AUDIENCE", "").strip()
+        and os.getenv("MODULE3_JWT_JWKS_URL", "").strip()
+    )
+    body_limit = os.getenv("MODULE3_MAX_BODY_BYTES", "32768")
+    rate_limit = os.getenv("MODULE3_RATE_LIMIT_REQUESTS", "20")
+    rate_window = os.getenv("MODULE3_RATE_LIMIT_WINDOW_SECONDS", "60")
+
+    if api_key_configured and jwt_enabled:
+        auth_mode = "API key or JWT"
+    elif api_key_configured:
+        auth_mode = "API key"
+    elif jwt_enabled:
+        auth_mode = "JWT"
+    else:
+        auth_mode = "none (local-dev compatibility mode)"
+
+    print("  Security posture:")
+    print(f"    • Module 3 auth mode: {auth_mode}")
+    print(f"    • Request body limit: {body_limit} bytes")
+    print(f"    • Rate limit: {rate_limit} requests/{rate_window}s per IP")
+    print()
+
+
 # ---------------------------------------------------------------------------
 # Section 1 — Framework Consistency
 # ---------------------------------------------------------------------------
@@ -144,10 +198,16 @@ def section_1_framework_consistency() -> None:
 # Section 2 — CDK Generation
 # ---------------------------------------------------------------------------
 
-def section_2_cdk_generation() -> None:
+def section_2_cdk_generation(repo_path: str | None = None) -> None:
     header("SECTION 2 — CDK Code Generation", "cyan")
     
-    user_says("Generate CDK infrastructure for a simple web application with PostgreSQL database")
+    if repo_path:
+        user_says(
+            "Generate CDK infrastructure for a simple web application with PostgreSQL database "
+            f"(source repo: {repo_path})"
+        )
+    else:
+        user_says("Generate CDK infrastructure for a simple web application with PostgreSQL database")
     
     print("\n  [Module 3 Agent] Analyzing requirements...")
     print("  [Module 3 Agent] Using LangGraph ReAct Agent")
@@ -163,18 +223,24 @@ def section_2_cdk_generation() -> None:
     print("  🔧 [Step 2] ACT → generate_cdk_stack(stack_type='vpc', ...)")
     # Call the underlying function, not the LangChain tool wrapper
     result = cdk_tools.generate_cdk_stack.func("vpc", json.dumps({"max_azs": 2, "nat_gateways": 1}))
-    vpc_data = json.loads(result)
+    vpc_data = _parse_tool_result(result, "generate_cdk_stack[vpc]")
     print("  ✓  OBSERVE ← VPC stack generated\n")
     
     print("  🔧 [Step 3] ACT → generate_cdk_stack(stack_type='rds', ...)")
     result = cdk_tools.generate_cdk_stack.func("rds", json.dumps({"engine": "POSTGRES", "multi_az": True}))
-    rds_data = json.loads(result)
+    rds_data = _parse_tool_result(result, "generate_cdk_stack[rds]")
     print("  ✓  OBSERVE ← RDS stack generated\n")
     
     print("  🔧 [Step 4] ACT → validate_cdk_syntax(...)")
     print("  ✓  OBSERVE ← Syntax validation: PASS\n")
     
-    box("Generated VPC Stack (excerpt)", vpc_data["data"]["code"][:400] + "\n...")
+    if vpc_data and isinstance(vpc_data.get("code"), str):
+        box("Generated VPC Stack (excerpt)", str(vpc_data["code"])[:400] + "\n...")
+    else:
+        box(
+            "Generated VPC Stack",
+            "VPC stack generation did not return valid code. Check tool error output above.",
+        )
     
     concept(
         "The agent decomposed the request into multiple tool calls: analyze requirements, "
@@ -582,7 +648,7 @@ def section_10_self_correction() -> None:
 # Section 11 — Full Workflow
 # ---------------------------------------------------------------------------
 
-def section_11_full_workflow() -> None:
+def section_11_full_workflow(repo_path: str | None = None) -> None:
     header("SECTION 11 — Complete Multi-Agent Workflow", "cyan")
     
     box(
@@ -603,6 +669,8 @@ RESULTS + METRICS"""
     )
     
     print("\n  Starting complete workflow...\n")
+    if repo_path:
+        print(f"  [Input] Real repository path: {repo_path}\n")
     
     # Step 1: Routing
     print("  [Step 1] ROUTING AGENT")
@@ -679,10 +747,17 @@ def main() -> None:
     parser.add_argument("--repo", type=str, help="Path to real repository to analyze")
     args = parser.parse_args()
 
-    # Set mock mode if no real repo provided
-    if not args.repo:
+    # Set explicit demo mode to avoid stale shell environment ambiguity.
+    if args.repo:
+        os.environ["AGENT_MOCK_REPO"] = "false"
+        print(f"  Real mode ON  (repo={args.repo})\n")
+    else:
         os.environ["AGENT_MOCK_REPO"] = "true"
         print("  Mock mode ON  (pass --repo /path to analyze a real repository)\n")
+
+    effective_mock = os.getenv("AGENT_MOCK_REPO", "false").lower() == "true"
+    print(f"  Effective mode: {'MOCK' if effective_mock else 'REAL'}\n")
+    _print_security_posture()
 
     header("MODULE 3 DEMO — EVALUATION & CDK GENERATION", "bold cyan")
     print("""
@@ -700,17 +775,17 @@ def main() -> None:
 """)
 
     sections = {
-        1: section_1_framework_consistency,
-        2: section_2_cdk_generation,
-        3: section_3_interactive_questions,
-        4: section_4_complex_infrastructure,
-        5: section_5_evaluation_pipeline,
-        6: section_6_llm_as_judge,
-        7: section_7_patronus_ai,
-        8: section_8_deepchecks,
-        9: section_9_routing_agent,
-        10: section_10_self_correction,
-        11: section_11_full_workflow,
+        1: lambda: section_1_framework_consistency(),
+        2: lambda: section_2_cdk_generation(args.repo),
+        3: lambda: section_3_interactive_questions(),
+        4: lambda: section_4_complex_infrastructure(),
+        5: lambda: section_5_evaluation_pipeline(),
+        6: lambda: section_6_llm_as_judge(),
+        7: lambda: section_7_patronus_ai(),
+        8: lambda: section_8_deepchecks(),
+        9: lambda: section_9_routing_agent(),
+        10: lambda: section_10_self_correction(),
+        11: lambda: section_11_full_workflow(args.repo),
     }
 
     if args.section:

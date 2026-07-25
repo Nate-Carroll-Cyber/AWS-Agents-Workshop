@@ -13,8 +13,13 @@ Evaluates generated CDK code for:
 from __future__ import annotations
 
 import ast
+import os
 from dataclasses import dataclass
 from typing import Any
+
+
+MAX_CDK_CODE_CHARS = int(os.getenv("MODULE3_EVAL_MAX_CDK_CODE_CHARS", "200000"))
+MAX_EXPECTED_RESOURCES = int(os.getenv("MODULE3_EVAL_MAX_EXPECTED_RESOURCES", "100"))
 
 
 @dataclass
@@ -73,6 +78,32 @@ def evaluate_cdk_code(
     """
     issues = []
     recommendations = []
+
+    if not isinstance(cdk_code, str):
+        raise TypeError("cdk_code must be a string")
+
+    if len(cdk_code) > MAX_CDK_CODE_CHARS:
+        issues.append(
+            f"Input exceeds maximum CDK code size ({MAX_CDK_CODE_CHARS} chars)"
+        )
+        recommendations.append("Reduce input size or increase MODULE3_EVAL_MAX_CDK_CODE_CHARS")
+        return CDKEvaluationResult(
+            syntax_valid=False,
+            syntax_errors=[],
+            completeness_score=0,
+            best_practices_score=0,
+            security_score=0,
+            overall_score=0,
+            issues=issues,
+            recommendations=recommendations,
+        )
+
+    if expected_resources is not None and len(expected_resources) > MAX_EXPECTED_RESOURCES:
+        issues.append(
+            f"expected_resources exceeds maximum allowed entries ({MAX_EXPECTED_RESOURCES})"
+        )
+        recommendations.append("Trim expected_resources or increase MODULE3_EVAL_MAX_EXPECTED_RESOURCES")
+        expected_resources = expected_resources[:MAX_EXPECTED_RESOURCES]
     
     # 1. Syntax validation
     syntax_valid = True
@@ -144,7 +175,7 @@ def evaluate_cdk_code(
             recommendations.append(f"Consider adding {check.replace('_', ' ')} configuration")
     
     # Check for security anti-patterns
-    if "block_public_access=False" in cdk_code.lower():
+    if "block_public_access=false" in cdk_code.lower():
         security_score -= 30
         issues.append("Security issue: Public access enabled")
     
@@ -194,9 +225,14 @@ def evaluate_cdk_batch(
     list of CDKEvaluationResult
         Evaluation results for each sample.
     """
+    if not isinstance(code_samples, list):
+        raise TypeError("code_samples must be a list")
+
     results = []
     
     for sample in code_samples:
+        if not isinstance(sample, dict) or "code" not in sample:
+            raise ValueError("Each code sample must be a dict containing a 'code' field")
         result = evaluate_cdk_code(
             cdk_code=sample["code"],
             expected_resources=sample.get("expected_resources"),

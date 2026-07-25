@@ -73,6 +73,9 @@ def create_agent(
     ... })
     >>> print(result["messages"][-1].content)
     """
+    if max_iterations < 1:
+        raise ValueError("max_iterations must be >= 1")
+
     aws_region = region or os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "us-east-1"
 
     # ── REASONING LAYER ──────────────────────────────────────────────────────
@@ -101,7 +104,7 @@ def create_agent(
         state_modifier=SYSTEM_PROMPT,
     )
 
-    return agent
+    return agent.with_config({"recursion_limit": max_iterations * 3})
 
 
 # ---------------------------------------------------------------------------

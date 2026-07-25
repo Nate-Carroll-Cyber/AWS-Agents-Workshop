@@ -24,6 +24,7 @@ from __future__ import annotations
 import ast
 import json
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -40,6 +41,68 @@ from module3.templates.cdk_patterns import (
 
 # Mock mode flag
 _MOCK = os.getenv("AGENT_MOCK_REPO", "false").lower() == "true"
+MAX_REQUIREMENTS_CHARS = int(os.getenv("MODULE3_TOOLS_MAX_REQUIREMENTS_CHARS", "100000"))
+MAX_PARAMETERS_CHARS = int(os.getenv("MODULE3_TOOLS_MAX_PARAMETERS_CHARS", "50000"))
+MAX_CDK_CODE_CHARS = int(os.getenv("MODULE3_TOOLS_MAX_CDK_CODE_CHARS", "200000"))
+MAX_STACK_NAME_LEN = int(os.getenv("MODULE3_TOOLS_MAX_STACK_NAME_LEN", "64"))
+MAX_SERVICE_LEN = int(os.getenv("MODULE3_TOOLS_MAX_SERVICE_LEN", "40"))
+
+_SAFE_PY_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_SAFE_TEST_TYPE_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+_STACK_TYPES = {"vpc", "ecs", "rds", "elasticache", "s3", "lambda"}
+
+
+def _error_data(
+    *,
+    error_code: str,
+    message: str,
+    retry_with: str,
+    escalate: bool,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build standardized tool error payload."""
+    payload: dict[str, Any] = {
+        "error_code": error_code,
+        "error": message,
+        "retry_with": retry_with,
+        "escalate": escalate,
+    }
+    if extra:
+        payload.update(extra)
+    return payload
+
+
+def _validate_text_input(name: str, value: str, max_chars: int) -> str:
+    """Validate bounded string input."""
+    if not isinstance(value, str):
+        raise TypeError(f"{name} must be a string")
+    if not value.strip():
+        raise ValueError(f"{name} is required")
+    if len(value) > max_chars:
+        raise ValueError(f"{name} exceeds maximum length ({max_chars})")
+    return value
+
+
+def _parse_json_object(raw: str, field_name: str) -> dict[str, Any]:
+    """Parse and validate JSON object payloads."""
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"{field_name} must be valid JSON") from exc
+
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{field_name} must be a JSON object")
+    return parsed
+
+
+def _validate_stack_type(stack_type: str) -> str:
+    """Validate supported stack type."""
+    if not isinstance(stack_type, str):
+        raise TypeError("stack_type must be a string")
+    normalized = stack_type.strip().lower()
+    if normalized not in _STACK_TYPES:
+        raise ValueError(f"Unknown stack type: {stack_type}")
+    return normalized
 
 
 # ---------------------------------------------------------------------------
@@ -185,6 +248,12 @@ def analyze_infrastructure_requirements(requirements: str) -> str:
 
     # Real implementation would parse JSON or text requirements
     try:
+        requirements = _validate_text_input(
+            "requirements",
+            requirements,
+            MAX_REQUIREMENTS_CHARS,
+        )
+
         # Try to parse as JSON first (Module 2 output)
         req_data = json.loads(requirements)
         
@@ -216,6 +285,16 @@ def analyze_infrastructure_requirements(requirements: str) -> str:
             ],
         }
         return _wrap(result, "analyze_infrastructure_requirements")
+    except Exception as exc:
+        return _wrap(
+            _error_data(
+                error_code="INVALID_REQUIREMENTS",
+                message=str(exc),
+                retry_with="Provide requirements as JSON object text or concise plain text within allowed size.",
+                escalate=False,
+            ),
+            "analyze_infrastructure_requirements",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -246,11 +325,25 @@ def generate_cdk_stack(
         JSON string with generated CDK code and metadata
     """
     try:
-        params = json.loads(parameters) if parameters else {}
-    except json.JSONDecodeError:
-        params = {}
-
-    stack_type = stack_type.lower()
+        stack_type = _validate_stack_type(stack_type)
+        params: dict[str, Any] = {}
+        if parameters:
+            bounded_params = _validate_text_input(
+                "parameters",
+                parameters,
+                MAX_PARAMETERS_CHARS,
+            )
+            params = _parse_json_object(bounded_params, "parameters")
+    except Exception as exc:
+        return _wrap(
+            _error_data(
+                error_code="INVALID_STACK_PARAMETERS",
+                message=str(exc),
+                retry_with="Use a supported stack_type and provide parameters as a JSON object.",
+                escalate=False,
+            ),
+            "generate_cdk_stack",
+        )
     
     # Generate stack based on type
     if stack_type == "vpc":
@@ -307,10 +400,25 @@ def generate_cdk_stack(
         )
     else:
         return _wrap(
-            {
-                "error": f"Unknown stack type: {stack_type}",
-                "supported_types": ["vpc", "ecs", "rds", "elasticache", "s3", "lambda"],
-            },
+            _error_data(
+                error_code="UNKNOWN_STACK_TYPE",
+                message=f"Unknown stack type: {stack_type}",
+                retry_with="Use one of: vpc, ecs, rds, elasticache, s3, lambda.",
+                escalate=False,
+                extra={"supported_types": sorted(_STACK_TYPES)},
+            ),
+            "generate_cdk_stack",
+        )
+
+    if len(code) > MAX_CDK_CODE_CHARS:
+        return _wrap(
+            _error_data(
+                error_code="GENERATED_CODE_TOO_LARGE",
+                message="Generated CDK code exceeds maximum allowed size",
+                retry_with="Reduce generated stack complexity or increase MODULE3_TOOLS_MAX_CDK_CODE_CHARS.",
+                escalate=False,
+                extra={"max_chars": MAX_CDK_CODE_CHARS, "generated_chars": len(code)},
+            ),
             "generate_cdk_stack",
         )
 
@@ -354,6 +462,19 @@ def validate_cdk_syntax(cdk_code: str) -> str:
     Returns:
         JSON string with validation results
     """
+    try:
+        cdk_code = _validate_text_input("cdk_code", cdk_code, MAX_CDK_CODE_CHARS)
+    except Exception as exc:
+        return _wrap(
+            _error_data(
+                error_code="INVALID_CDK_CODE_INPUT",
+                message=str(exc),
+                retry_with="Provide CDK code as a non-empty string within allowed size.",
+                escalate=False,
+            ),
+            "validate_cdk_syntax",
+        )
+
     # Syntax validation
     syntax_check = _validate_python_syntax(cdk_code)
 
@@ -424,6 +545,19 @@ def list_available_constructs(service: str) -> str:
     Returns:
         JSON string with available constructs and their descriptions
     """
+    try:
+        service = _validate_text_input("service", service, MAX_SERVICE_LEN)
+    except Exception as exc:
+        return _wrap(
+            _error_data(
+                error_code="INVALID_SERVICE_INPUT",
+                message=str(exc),
+                retry_with="Provide a supported AWS service key such as ec2, ecs, rds, s3, lambda.",
+                escalate=False,
+            ),
+            "list_available_constructs",
+        )
+
     constructs_db = {
         "ec2": [
             {"name": "Vpc", "level": "L2", "description": "VPC with subnets and routing"},
@@ -506,6 +640,25 @@ def generate_cdk_tests(stack_name: str, stack_type: str) -> str:
     Returns:
         JSON string with generated test code
     """
+    try:
+        stack_name = _validate_text_input("stack_name", stack_name, MAX_STACK_NAME_LEN)
+        if not _SAFE_PY_IDENTIFIER_RE.match(stack_name):
+            raise ValueError("stack_name must be a valid Python identifier")
+
+        stack_type = _validate_text_input("stack_type", stack_type, 32).strip().lower()
+        if not _SAFE_TEST_TYPE_RE.match(stack_type):
+            raise ValueError("stack_type must match ^[a-z][a-z0-9_]{0,31}$")
+    except Exception as exc:
+        return _wrap(
+            _error_data(
+                error_code="INVALID_TEST_GENERATION_INPUT",
+                message=str(exc),
+                retry_with="Use a valid Python class name for stack_name and a simple lowercase identifier for stack_type.",
+                escalate=False,
+            ),
+            "generate_cdk_tests",
+        )
+
     test_template = f'''"""
 Test suite for {stack_name}.
 """

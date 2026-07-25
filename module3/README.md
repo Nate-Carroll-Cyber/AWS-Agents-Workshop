@@ -150,6 +150,123 @@ curl -X POST http://localhost:8082/validate \
   -d '{"cdk_code": "from aws_cdk import Stack..."}'
 ```
 
+### HTTP Security Hardening
+
+Module 3 now supports perimeter controls similar to Module 2.
+
+Environment variables:
+
+- MODULE3_API_KEY: if set, requests must include X-API-Key or Authorization: Bearer <key>
+- MODULE3_MAX_BODY_BYTES: max JSON request size in bytes (default 32768)
+- MODULE3_RATE_LIMIT_REQUESTS: max requests per IP in window (default 20)
+- MODULE3_RATE_LIMIT_WINDOW_SECONDS: rate-limit window length in seconds (default 60)
+- MODULE3_CORS_ALLOW_ORIGIN: optional explicit CORS origin to allow (default unset)
+
+JWT/OIDC bearer validation (optional):
+
+- MODULE3_JWT_ISSUER: expected token issuer (iss)
+- MODULE3_JWT_AUDIENCE: expected token audience (aud)
+- MODULE3_JWT_JWKS_URL: JWKS endpoint URL for signature verification
+- MODULE3_JWT_ALGORITHMS: comma-separated accepted algorithms (default RS256)
+- MODULE3_JWT_LEEWAY_SECONDS: clock-skew tolerance in seconds (default 30)
+- MODULE3_JWT_REQUIRED_SCOPES: comma-separated scopes that must all be present
+- MODULE3_JWT_REQUIRED_ROLES: comma-separated roles/groups that must all be present
+- MODULE3_JWT_SCOPE_CLAIMS: claim names for scopes (default scope,scp)
+- MODULE3_JWT_ROLE_CLAIMS: claim names for roles (default roles,cognito:groups,groups)
+
+Install JWT dependencies before enabling JWT auth:
+
+```bash
+pip install "pyjwt[crypto]"
+```
+
+Default response security headers:
+
+- X-Content-Type-Options: nosniff
+- Cache-Control: no-store
+- Pragma: no-cache
+- Referrer-Policy: no-referrer
+- X-Frame-Options: DENY
+- Content-Security-Policy: default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'; object-src 'none'
+
+Auth behavior:
+
+- If MODULE3_API_KEY and JWT settings are both unset, local-dev compatibility mode allows unauthenticated requests.
+- If MODULE3_API_KEY is set, API key auth is accepted.
+- If JWT settings are complete, bearer JWT auth is accepted.
+- If both are configured, either method can authenticate.
+
+Example API key mode:
+
+```bash
+export MODULE3_API_KEY="change-me"
+python module3/app.py
+
+curl -X POST http://localhost:8082/analyze \
+    -H "X-API-Key: $MODULE3_API_KEY" \
+    -H "X-Correlation-ID: 550e8400-e29b-41d4-a716-446655440000" \
+    -H "Content-Type: application/json" \
+    -d '{"requirements": {"compute": "ECS", "database": "RDS"}}'
+```
+
+Example JWT mode:
+
+```bash
+export MODULE3_JWT_ISSUER="https://your-idp.example.com/"
+export MODULE3_JWT_AUDIENCE="cdk-generation-api"
+export MODULE3_JWT_JWKS_URL="https://your-idp.example.com/.well-known/jwks.json"
+export MODULE3_JWT_REQUIRED_SCOPES="cdk:generate"
+
+python module3/app.py
+
+curl -X POST http://localhost:8082/generate \
+    -H "Authorization: Bearer <jwt-token>" \
+    -H "X-Correlation-ID: 550e8400-e29b-41d4-a716-446655440000" \
+    -H "Content-Type: application/json" \
+    -d '{"requirements": {"compute": "ECS", "database": "RDS"}, "region": "us-east-1"}'
+```
+
+### Model and Agent Guardrails
+
+Module 3 model configuration now enforces:
+
+- AWS region format validation
+- Temperature bounds (0.0 to 1.0)
+- Max token bounds (1 to 8192)
+- Model ID allowlists for generation and judge models
+
+Environment variables:
+
+- MODULE3_ALLOWED_MODEL_IDS: comma-separated allowed generation model IDs
+- MODULE3_ALLOWED_JUDGE_MODEL_IDS: comma-separated allowed judge model IDs
+
+Agent runtime control:
+
+- create_agent validates max_iterations >= 1
+- recursion limit is set to max_iterations * 3 to constrain runaway tool loops
+
+### Error Contract
+
+Module 3 API error responses now use a stable structured payload:
+
+- error_code: machine-readable identifier
+- error: human-readable message
+- retry_with: remediation hint
+- escalate: true when operator/support escalation is recommended
+- correlation_id: request identifier (UUID)
+
+Example:
+
+```json
+{
+    "error_code": "REQUEST_BODY_TOO_LARGE",
+    "error": "request body too large",
+    "retry_with": "Reduce payload size or increase MODULE3_MAX_BODY_BYTES if policy permits.",
+    "escalate": false,
+    "correlation_id": "550e8400-e29b-41d4-a716-446655440000"
+}
+```
+
 ## Evaluation System
 
 Module 3 includes comprehensive evaluation capabilities:
